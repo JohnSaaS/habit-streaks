@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Streaks</title>
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Streaks">
+<meta name="theme-color" content="#14161A">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="manifest" href="manifest.json">
+<style>
+  :root { --bg:#14161A; --card:#1E2127; --line:#2B2F37; --text:#F2F4F7; --dim:#9AA1AD; --green:#22C55E; --greenInk:#08210F; --err:#F87171; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin:0; background:var(--bg); color:var(--text); overflow-x:hidden; }
+  body { font: 17px/1.35 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+    padding: calc(env(safe-area-inset-top) + 16px) calc(env(safe-area-inset-right) + 16px) calc(env(safe-area-inset-bottom) + 24px) calc(env(safe-area-inset-left) + 16px); }
+  main { max-width: 560px; margin: 0 auto; }
+  h1 { font-size: 28px; margin: 4px 0 2px; letter-spacing: -.3px; }
+  #status { font-size: 14px; color: var(--dim); min-height: 20px; margin-bottom: 14px; }
+  #status.err { color: var(--err); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:18px; padding:16px; margin-bottom:12px; }
+  .name { font-size: 19px; font-weight: 600; }
+  .row { display:flex; align-items:flex-end; justify-content:space-between; margin: 6px 0 14px; }
+  .streak { display:flex; align-items:baseline; gap:8px; }
+  .num { font-size: 52px; font-weight: 800; line-height: 1; font-variant-numeric: tabular-nums; }
+  .lbl { color: var(--dim); font-size: 15px; }
+  .best { color: var(--dim); font-size: 15px; }
+  .btns { display:flex; gap:10px; }
+  button { font: inherit; color: var(--text); border:1.5px solid var(--line); background:transparent; border-radius:14px; min-height:44px; cursor:pointer; }
+  button:active { transform: scale(.98); }
+  .today { flex: 1; min-height: 60px; font-size: 19px; font-weight: 700; }
+  .yest { flex: 0 0 38%; min-height: 60px; font-size: 16px; color: var(--dim); }
+  button.on { background: var(--green); border-color: var(--green); color: var(--greenInk); }
+  .yest.on { font-weight: 700; }
+</style>
+</head>
+<body>
+<main>
+  <h1 id="date"></h1>
+  <div id="status" aria-live="polite"></div>
+  <div id="list"></div>
+</main>
+<script src="streak.js"></script>
+<script>
+const HABITS = [
+  { id: 'workout',   name: 'Working out' },
+  { id: 'reading',   name: 'Reading' },
+  { id: 'meditate',  name: 'Meditating' },
+  { id: 'study',     name: 'Studying' },
+  { id: 'skincare',  name: 'Skin care' },
+];
+
+const API = 'https://wikeqozoeravyduqjvhm.supabase.co/rest/v1/habit_checks';
+const KEY = 'sb_publishable_V3tX3AaJ2qM_o3hD7uvIdw_H9B7MyEt';
+const HEADERS = { apikey: KEY, Authorization: 'Bearer ' + KEY, 'Content-Type': 'application/json' };
+const LS_CACHE = 'habit-streaks:cache:v1';
+const LS_PENDING = 'habit-streaks:pending:v1';
+
+// ---- localStorage helpers (every access wrapped) ----
+function lsGet(k) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : null; } catch (e) { return null; } }
+function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+
+// ---- state ----
+let base = {};            // habit id -> array of done days from last load or cache
+let pending = lsGet(LS_PENDING) || [];   // [{habit, day, done, updated_at}]
+let loadError = null;
+let statusMsg = '';
+let flushing = false, flushAgain = false;
+let loaded = false;
+let flushSeq = 0;        // bumps on every successful flush; a load that spans one is stale
+
+const cached = lsGet(LS_CACHE);
+if (cached && typeof cached === 'object') base = cached;
+
+function effectiveSet(habitId) {
+  const s = new Set(base[habitId] || []);
+  for (const w of pending) {
+    if (w.habit !== habitId) continue;
+    if (w.done) s.add(w.day); else s.delete(w.day);
+  }
+  return s;
+}
+
+function setStatus(msg, isErr) {
+  statusMsg = msg;
+  const el = document.getElementById('status');
+  el.textContent = msg;
+  el.className = isErr ? 'err' : '';
+}
+
+function render() {
+  const now = new Date();
+  const today = localDay(now);
+  const yest = addDays(today, -1);
+  document.getElementById('date').textContent =
+    now.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
+  const list = document.getElementById('list');
+  list.textContent = '';
+  for (const h of HABITS) {
+    const set = effectiveSet(h.id);
+    const card = document.createElement('div');
+    card.className = 'card';
+
+    const name = document.createElement('div');
+    name.className = 'name';
+    name.textContent = h.name;
+
+    const row = document.createElement('div');
+    row.className = 'row';
+    const streak = document.createElement('div');
+    streak.className = 'streak';
+    const num = document.createElement('span');
+    num.className = 'num';
+    num.textContent = String(currentStreak(set, today));
+    const lbl = document.createElement('span');
+    lbl.className = 'lbl';
+    lbl.textContent = 'day streak';
+    streak.append(num, lbl);
+    const best = document.createElement('div');
+    best.className = 'best';
+    best.textContent = 'Best ' + bestStreak(set);
+    row.append(streak, best);
+
+    const btns = document.createElement('div');
+    btns.className = 'btns';
+    btns.append(
+      makeBtn('today', 'Today', set.has(today), h.id, today),
+      makeBtn('yest', 'Yesterday', set.has(yest), h.id, yest)
+    );
+    card.append(name, row, btns);
+    list.append(card);
+  }
+}
+
+function makeBtn(cls, label, isOn, habitId, day) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = cls + (isOn ? ' on' : '');
+  b.setAttribute('aria-pressed', isOn ? 'true' : 'false');
+  b.textContent = (isOn ? '✓ ' : '') + label;
+  b.addEventListener('click', () => toggle(habitId, day));
+  return b;
+}
+
+function toggle(habitId, day) {
+  // Only today and yesterday are editable; recompute at tap time.
+  const today = localDay(new Date());
+  if (day !== today && day !== addDays(today, -1)) { render(); return; }
+  const next = !effectiveSet(habitId).has(day);
+  pending = pending.filter((w) => !(w.habit === habitId && w.day === day));
+  pending.push({ habit: habitId, day, done: next, updated_at: new Date().toISOString() });
+  lsSet(LS_PENDING, pending);
+  setStatus('Saving...', false);
+  render();
+  flush();
+}
+
+async function flush() {
+  if (!pending.length) return;
+  if (flushing) { flushAgain = true; return; }
+  flushing = true;
+  const batch = pending.slice();
+  try {
+    const res = await fetch(API, {
+      method: 'POST',
+      headers: Object.assign({ Prefer: 'resolution=merge-duplicates,return=minimal' }, HEADERS),
+      body: JSON.stringify(batch),
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + (await res.text()).slice(0, 120));
+    // Fold flushed writes into base, drop them from the queue (unless re-toggled meanwhile).
+    for (const w of batch) {
+      const days = new Set(base[w.habit] || []);
+      if (w.done) days.add(w.day); else days.delete(w.day);
+      base[w.habit] = Array.from(days);
+    }
+    flushSeq++;
+    pending = pending.filter((w) => !batch.includes(w));
+    lsSet(LS_PENDING, pending);
+    lsSet(LS_CACHE, base);
+    setStatus(pending.length ? 'Saving...' : 'Saved', false);
+  } catch (e) {
+    setStatus('Offline, will sync' + (navigator.onLine ? ' (' + e.message + ')' : ''), true);
+  } finally {
+    flushing = false;
+    render();
+    if (flushAgain) { flushAgain = false; flush(); }
+  }
+}
+
+async function load() {
+  const seq = flushSeq;
+  try {
+    const res = await fetch(API + '?select=habit,day,done&done=eq.true', { headers: HEADERS });
+    if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + (await res.text()).slice(0, 160));
+    const rows = await res.json();
+    if (seq !== flushSeq || flushing) { setTimeout(load, 300); return; }
+    const next = {};
+    for (const r of rows) (next[r.habit] = next[r.habit] || []).push(r.day);
+    base = next;
+    loaded = true;
+    loadError = null;
+    lsSet(LS_CACHE, base);
+    if (!pending.length) setStatus('Saved', false);
+  } catch (e) {
+    loadError = 'Could not load streaks: ' + e.message;
+    setStatus(loadError + (cached || loaded ? ' (showing saved data)' : ''), true);
+  }
+  render();
+  flush();
+}
+
+function refresh() { render(); load(); }
+
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') refresh(); });
+window.addEventListener('online', () => { flush(); load(); });
+
+render();
+if (pending.length) setStatus('Offline, will sync', true);
+load();
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => { navigator.serviceWorker.register('sw.js').catch(() => {}); });
+}
+</script>
+</body>
+</html>
